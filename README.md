@@ -1,50 +1,112 @@
-# Welcome to your Expo app 👋
+# Readler
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+Offline text-to-speech reader for iOS and Android. Import books, paste text, or browse free public domain literature — then listen with natural-sounding voices, no internet required.
 
-## Get started
+Built with React Native + Expo. Runs KittenTTS Nano (ONNX) entirely on-device.
 
-1. Install dependencies
+---
 
-   ```bash
-   npm install
-   ```
+## Features
 
-2. Start the app
+**Read anything out loud**
+- Import PDF or EPUB files from your device
+- Paste or type any text
+- Browse and download books from Standard Ebooks (free, public domain)
 
-   ```bash
-   npx expo start
-   ```
+**Smart TTS playback**
+- 8 voices (4 female, 4 male) with adjustable speed
+- Sentence-by-sentence highlighting with live progress
+- Pre-buffered synthesis — sentences are prepared ahead of time for minimal gaps
+- Seamless page transitions with no audio interruption
 
-In the output, you'll find options to open the app in a
+**Pause, resume, bookmark**
+- Pause mid-sentence, resume from the exact position
+- Bookmarks saved to disk — close the app, come back later, pick up where you left off
+- Navigate pages freely while audio continues playing
 
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
+**Proper sentence splitting**
+- Handles abbreviations (Mr., Dr., St.) without false breaks
+- Respects quoted speech — `he said "ok!"` stays as one sentence
+- Preserves em-dashes, curly quotes, and paragraph structure
 
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
+**Fully offline**
+- Model + voices downloaded once on first launch (~60MB total)
+- All inference runs locally via ONNX Runtime
+- No server, no API keys, no data leaves your device
 
-## Get a fresh project
+---
 
-When you're ready, run:
+## Stack
+
+| Layer | Tech |
+|---|---|
+| Framework | Expo SDK 54, React Native 0.81, Hermes |
+| TTS Model | KittenTTS Nano v0.8 (ONNX, 24kHz) |
+| Inference | onnxruntime-react-native 1.24.3 |
+| Phonemizer | espeak-ng compiled to asm.js (Xenova/phonemizer) |
+| Audio | expo-audio |
+| Navigation | expo-router (file-based, Stack) |
+| Storage | expo-secure-store, expo-file-system |
+
+---
+
+## Getting Started
 
 ```bash
-npm run reset-project
+# Install dependencies
+npm install
+
+# Start dev server
+npx expo start
+
+# Run on device
+npx expo run:ios
+npx expo run:android
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+> Requires a development build (not Expo Go) due to native ONNX Runtime dependency.
 
-## Learn more
+---
 
-To learn more about developing your project with Expo, look at the following resources:
+## Project Structure
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+```
+app/
+  (app)/
+    home.tsx          Home screen — recents, action cards
+    reader.tsx        Text reader — paste/type, listen
+    book.tsx          Document reader — PDF/EPUB, paginated TTS
+    library.tsx       Standard Ebooks — browse, search
+    book-detail.tsx   Book detail — metadata, download
+    settings.tsx      Voice, speed, data management
 
-## Join the community
+hooks/
+  useSentencePlayer.ts   Sentence-level TTS with lookahead queue
 
-Join our community of developers creating universal apps.
+lib/
+  tts/
+    engine.ts         ONNX inference, audio synthesis
+    phonemizer.ts     Text to IPA phonemes
+    preprocessor.ts   Number/currency normalization
+    symbols.ts        IPA to token mapping
+  document-extract.ts  PDF/EPUB unified extraction
+  epub-extract.ts      EPUB unzip + text extraction
+  standard-ebooks.ts   Standard Ebooks catalog API
+  settings.ts          Settings, recents, bookmarks
+  pending.ts           Cross-screen data passing
+```
 
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+---
+
+## Patches
+
+Two patches are applied automatically via `patch-package`:
+
+- **phonemizer**: Replaces `Blob`/`DecompressionStream` with `pako.inflate()` for Hermes compatibility
+- **onnxruntime-react-native**: Adds 16KB page alignment for Android Play Store compliance
+
+---
+
+## License
+
+All books sourced from [Standard Ebooks](https://standardebooks.org) are public domain.

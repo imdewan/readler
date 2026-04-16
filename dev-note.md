@@ -142,28 +142,48 @@ Sentence-level TTS with lookahead pre-synthesis to minimize gaps between sentenc
 
 Clean home screen (`app/(app)/home.tsx`) with:
 - Greeting header with voice/speed pill and settings shortcut
-- Compact clipboard card for quick-paste reading
-- Recent documents list with type-aware icons
-- "Start listening" bottom panel: Text (paste/type) and Document (import) entry points
+- Recent documents list with type-aware icons, deduplication (moves existing item to top instead of adding duplicate)
+- Action cards: Text (paste/type), Document (import PDF/EPUB), Library (Standard Ebooks)
 - Tip cards shown when no recent items exist
 
 ### Standard Ebooks Library
 
-Browse and download free public domain books from Standard Ebooks (`app/(app)/library.tsx`).
+Browse and download free public domain books from Standard Ebooks.
 
-- **Catalog browsing** (`lib/standard-ebooks.ts`): Scrapes Standard Ebooks HTML listing pages, parses book metadata (title, author, cover, slug).
-- **Search**: Debounced search with 500ms delay, uses Standard Ebooks query param.
-- **Tabs**: Popular and Newest sorting when not searching.
-- **Infinite scroll**: Loads more books on scroll via page param.
-- **Download flow**: Downloads EPUB to cache via `expo-file-system`, passes URI to book.tsx via pending system.
-- **Attribution**: "Books from Standard Ebooks" shown at bottom.
+- **Library screen** (`app/(app)/library.tsx`): Search with 500ms debounce, Popular/Newest tabs, infinite scroll, book cards with cover, title, and "By Author" format.
+- **Book detail screen** (`app/(app)/book-detail.tsx`): Cover image, title, author, meta pills (word count, reading time, reading ease), description, subject tags, "Read this book" download CTA.
+- **Catalog API** (`lib/standard-ebooks.ts`): Scrapes Standard Ebooks HTML pages, parses book metadata via regex. Handles both listing pages and individual book detail pages.
+- **Download flow**: Downloads EPUB to cache, passes file URI to book.tsx via pending system. Cached EPUB is deleted after text extraction to prevent pile-up.
+- **Attribution**: Info icon in library header shows Standard Ebooks attribution alert.
 
 ### Pause/Resume with Bookmarks
 
 - **Pause** stops audio mid-sentence, saves page + sentence index to disk (`lib/settings.ts` bookmark API).
-- **Resume** from paused state continues from exact sentence. From cold open, loads saved bookmark and shows highlighted sentence view.
+- **Resume** from paused state re-synthesizes the paused sentence and continues from exact position. From cold open, loads saved bookmark and shows highlighted sentence view.
 - **Navigate away** auto-pauses and saves bookmark. Coming back restores position.
 - **Free page browsing** during playback — `playingPage` tracks TTS position separately from `currentPage`.
+
+### Smart Sentence Splitting
+
+Sentence splitter (`hooks/useSentencePlayer.ts: splitSentences()`) handles real-world book text:
+
+- **Abbreviation-aware**: Won't split on `Mr.`, `Mrs.`, `Dr.`, `St.`, `Jr.`, `Prof.`, etc.
+- **Quote-aware**: Punctuation inside quotes (`he said "ok!"`) doesn't create a false split. Closing quotes (`"`, `"`, `'`) are consumed with their sentence.
+- **Preserves formatting**: Em-dashes, en-dashes, and special punctuation kept intact. Paragraph breaks rendered as `"\n\n"` in the sentence view.
+- **Inline text flow**: Sentence highlighting uses nested `<Text>` components (not flex-wrap) so text flows identically to the non-playing view.
+
+### Seamless Page Transitions
+
+When TTS finishes a page and auto-advances to the next:
+
+- **`continuing` flag**: Skips `clearBuffer()`, model re-check, and synchronous preload. Queue starts synthesizing immediately.
+- **Phase preserved**: Stays in `"playing"` phase — no spinner flash between pages.
+
+### WAV Cleanup
+
+- `clearBuffer()` deletes the entire `tts_buf/` directory on play start, stop, and natural end.
+- Downloaded EPUBs deleted from cache after text extraction.
+- "Clear all data" in settings wipes settings, recents, and bookmarks.
 
 ---
 

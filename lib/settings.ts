@@ -96,6 +96,7 @@ export async function saveRecent(item: Omit<RecentItem, 'timestamp'>): Promise<v
 export async function clearAllData(): Promise<void> {
   await SecureStore.deleteItemAsync(KEY);
   if (recentFile.exists) recentFile.delete();
+  if (bookmarkFile.exists) bookmarkFile.delete();
 }
 
 // ── Bookmarks (pause position) ──────────────────────────────────────────────
