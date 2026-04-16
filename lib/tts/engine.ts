@@ -16,7 +16,7 @@ const VOICES_URL =
 
 const MODEL_PATH  = (FileSystem.documentDirectory ?? '') + 'kittentts_nano.onnx';
 const VOICES_PATH = (FileSystem.documentDirectory ?? '') + 'kittentts_voices.npz';
-const WAV_PATH    = (FileSystem.cacheDirectory ?? '') + 'kittentts_out.wav';
+const WAV_DIR     = (FileSystem.cacheDirectory ?? '') + 'tts_buf/';
 const SAMPLE_RATE = 24000;
 const TRIM_TAIL   = 5000; // samples trimmed from end (silence artifact)
 
@@ -166,8 +166,15 @@ export interface SpeakOptions {
   speed?: number;   // Multiplier, default 1.0
 }
 
-/** Synthesize text and play audio. Throws if model not loaded. */
-export async function speak(text: string, opts: SpeakOptions = {}): Promise<void> {
+let _bufId = 0;
+
+async function ensureWavDir() {
+  const info = await FileSystem.getInfoAsync(WAV_DIR);
+  if (!info.exists) await FileSystem.makeDirectoryAsync(WAV_DIR, { intermediates: true });
+}
+
+/** Synthesize text to a WAV file, return its path. Does NOT play. */
+export async function synthesize(text: string, opts: SpeakOptions = {}): Promise<string> {
   if (!_session || !_voices) throw new Error('Model not loaded — call loadModel() first');
 
   const voiceName = opts.voice ?? 'Bella';
@@ -175,11 +182,9 @@ export async function speak(text: string, opts: SpeakOptions = {}): Promise<void
   const speedPrior = SPEED_PRIORS[voiceKey] ?? 0.8;
   const speed = speedPrior * (opts.speed ?? 1.0);
 
-  // Build token IDs (async — calls native espeak-ng)
   const inputIds = await textToTokenIds(text);
   const seqLen = inputIds.length;
 
-  // Pick style vector: ref_id = min(seqLen, nRows-1)
   const styleVec = getStyleVector(_voices, voiceKey, Math.min(seqLen, 255));
   const styleDim = styleVec.length;
 
@@ -190,29 +195,47 @@ export async function speak(text: string, opts: SpeakOptions = {}): Promise<void
   };
 
   const results = await _session.run(feeds);
-
-  // First output tensor contains the audio
   const outputName = _session.outputNames[0];
   const rawAudio = results[outputName].data as Float32Array;
 
-  // Trim silence tail (same as Python: outputs[0][..., :-5000])
   const audio = rawAudio.length > TRIM_TAIL
     ? rawAudio.slice(0, rawAudio.length - TRIM_TAIL)
     : rawAudio;
 
-  // Encode to WAV and write to cache
   const wav = encodeWav(audio, SAMPLE_RATE);
   const b64 = uint8ToBase64(wav);
-  await FileSystem.writeAsStringAsync(WAV_PATH, b64, {
+
+  await ensureWavDir();
+  const wavPath = WAV_DIR + `buf_${_bufId++}.wav`;
+  await FileSystem.writeAsStringAsync(wavPath, b64, {
     encoding: FileSystem.EncodingType.Base64,
   });
 
-  // Stop any currently playing audio
-  await stop();
+  return wavPath;
+}
 
-  // Play and wait for completion
-  await setAudioModeAsync({ playsInSilentMode: true });
-  _player = createAudioPlayer(WAV_PATH);
+let _audioModeSet = false;
+let _stopResolve: (() => void) | null = null;
+
+/** Pre-create a player for a WAV file (does not play yet). */
+export function preparePlayer(wavPath: string): AudioPlayer {
+  return createAudioPlayer(wavPath);
+}
+
+/** Play a WAV file and wait for completion. */
+export async function playFile(wavPath: string): Promise<void> {
+  // Release previous player (don't pause — it already finished naturally)
+  if (_player) {
+    _player.release();
+    _player = null;
+  }
+
+  if (!_audioModeSet) {
+    await setAudioModeAsync({ playsInSilentMode: true });
+    _audioModeSet = true;
+  }
+
+  _player = createAudioPlayer(wavPath);
 
   let _resolve: (() => void) | null = null;
   _stopResolve = () => { _resolve?.(); };
@@ -230,7 +253,42 @@ export async function speak(text: string, opts: SpeakOptions = {}): Promise<void
   });
 }
 
-let _stopResolve: (() => void) | null = null;
+/** Play a pre-created player and wait for completion. */
+export async function playPrepared(prepared: AudioPlayer): Promise<void> {
+  // Release previous
+  if (_player) {
+    _player.release();
+    _player = null;
+  }
+
+  if (!_audioModeSet) {
+    await setAudioModeAsync({ playsInSilentMode: true });
+    _audioModeSet = true;
+  }
+
+  _player = prepared;
+
+  let _resolve: (() => void) | null = null;
+  _stopResolve = () => { _resolve?.(); };
+
+  return new Promise<void>((resolve) => {
+    _resolve = resolve;
+    const sub = _player!.addListener('playbackStatusUpdate', (status) => {
+      if (status.didJustFinish) {
+        sub.remove();
+        _stopResolve = null;
+        resolve();
+      }
+    });
+    _player!.play();
+  });
+}
+
+/** Synthesize text and play audio. Throws if model not loaded. */
+export async function speak(text: string, opts: SpeakOptions = {}): Promise<void> {
+  const wavPath = await synthesize(text, opts);
+  await playFile(wavPath);
+}
 
 /** Stop currently playing audio. */
 export async function stop(): Promise<void> {
@@ -242,4 +300,15 @@ export async function stop(): Promise<void> {
     _player = null;
   }
   resolve?.();
+}
+
+/** Delete all cached WAV files in tts_buf/. */
+export async function clearBuffer(): Promise<void> {
+  try {
+    const info = await FileSystem.getInfoAsync(WAV_DIR);
+    if (info.exists) {
+      await FileSystem.deleteAsync(WAV_DIR, { idempotent: true });
+    }
+    _bufId = 0;
+  } catch {}
 }

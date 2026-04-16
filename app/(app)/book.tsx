@@ -8,38 +8,39 @@ import React, {
 import {
   View,
   Text,
+  TextInput,
   TouchableOpacity,
   StyleSheet,
   Dimensions,
-  FlatList,
+  ScrollView,
   Platform,
   ActivityIndicator,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { router, useFocusEffect } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import * as DocumentPicker from "expo-document-picker";
-import Animated, {
-  FadeIn,
-  FadeOut,
-  SlideInDown,
-  SlideOutDown,
-} from "react-native-reanimated";
 import { C, Spacing, Radius, FontSize } from "@/constants/theme";
 import { ScreenHeader } from "@/components/ScreenHeader";
-import { loadSettings, saveRecent, type AppSettings } from "@/lib/settings";
-import { consumePending } from "@/lib/pending";
+import {
+  loadSettings,
+  saveRecent,
+  saveBookmark,
+  loadBookmark,
+  removeBookmark,
+  type AppSettings,
+  type Bookmark,
+} from "@/lib/settings";
+import { consumePending, consumePendingTitle } from "@/lib/pending";
 import { stop } from "@/lib/tts";
 import {
   extractDocument,
   splitIntoPages,
   type ExtractedDocument,
 } from "@/lib/document-extract";
-import { PlayerBar } from "@/components/PlayerBar";
-import { useSentencePlayer } from "@/hooks/useSentencePlayer";
+import { useSentencePlayer, splitSentences } from "@/hooks/useSentencePlayer";
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get("window");
-const PAGE_PADDING_H = 28;
-const PAGE_PADDING_V = 24;
 
 function wordCount(t: string) {
   return t.trim().split(/\s+/).filter(Boolean).length;
@@ -55,37 +56,79 @@ export default function BookReader() {
   const [extracting, setExtracting] = useState(false);
   const [error, setError] = useState("");
   const pending = consumePending();
-  const [docName, setDocName] = useState(pending ? "Restored document" : "");
+  const pendingTitle = consumePendingTitle();
+  const [docName, setDocName] = useState(pendingTitle || (pending ? "Document" : ""));
   const [doc, setDoc] = useState<ExtractedDocument | null>(
     pending ? { type: "pdf", chapters: [pending], fullText: pending } : null,
   );
   const [settings, setSettings] = useState<AppSettings | null>(null);
-  const [fontSizeIdx, setFontSizeIdx] = useState(2); // 18px default
-  const [showControls, setShowControls] = useState(false);
+  const [fontSizeIdx, setFontSizeIdx] = useState(2);
   const [currentPage, setCurrentPage] = useState(0);
-  const listRef = useRef<FlatList>(null);
+  const [playingPage, setPlayingPage] = useState(-1);
+  const [editing, setEditing] = useState(false);
+  const [bookmark, setBookmark] = useState<Bookmark | null>(null);
+  const scrollRef = useRef<ScrollView>(null);
 
   useEffect(() => {
     loadSettings().then(setSettings);
   }, []);
+
+  // Load bookmark when doc changes
+  useEffect(() => {
+    if (docName) {
+      loadBookmark(docName).then((bm) => {
+        if (bm) {
+          setBookmark(bm);
+          setCurrentPage(bm.page);
+        }
+      });
+    }
+  }, [docName]);
 
   const player = useSentencePlayer({
     voice: settings?.voice ?? "Bella",
     speed: settings?.speed ?? 1.2,
   });
 
+  // Pause and save bookmark when navigating away
+  const playerRef = useRef(player);
+  playerRef.current = player;
+  const docNameRef = useRef(docName);
+  docNameRef.current = docName;
+
+  useFocusEffect(
+    useCallback(() => {
+      return () => {
+        const p = playerRef.current;
+        if (playingRef.current || p.phase === "playing") {
+          p.pause();
+          const name = docNameRef.current;
+          if (name) {
+            const sentIdx = p.activeIndex >= 0 ? p.activeIndex : 0;
+            saveBookmark({
+              docName: name,
+              page: currentPageRef.current,
+              sentenceIndex: sentIdx,
+              timestamp: Date.now(),
+            });
+          }
+        }
+        playingRef.current = false;
+        p.stop();
+      };
+    }, []),
+  );
+
   const playing = player.phase === "playing";
+  const paused = player.phase === "paused";
   const fontSize = FONT_SIZES[fontSizeIdx];
 
   // Split document into pages
   const pages = useMemo(() => {
     if (!doc) return [];
-    // Estimate chars per page based on font size and screen
     const lineHeight = fontSize * 1.75;
     const linesPerPage = Math.floor((SCREEN_H - 260) / lineHeight);
-    const charsPerLine = Math.floor(
-      (SCREEN_W - PAGE_PADDING_H * 2) / (fontSize * 0.52),
-    );
+    const charsPerLine = Math.floor((SCREEN_W - 56) / (fontSize * 0.52));
     const charsPerPage = Math.max(400, linesPerPage * charsPerLine);
 
     const allPages: string[] = [];
@@ -111,6 +154,7 @@ export default function BookReader() {
       setDocName(asset.name ?? "document");
       setDoc(null);
       setCurrentPage(0);
+      setEditing(false);
       setExtracting(true);
       const extracted = await extractDocument(
         asset.uri,
@@ -127,168 +171,258 @@ export default function BookReader() {
 
   const savedRef = useRef("");
 
+  // Play current page, then auto-advance
+  const playingRef = useRef(false);
+  const currentPageRef = useRef(currentPage);
+  currentPageRef.current = currentPage;
+
+  const playingPageRef = useRef(-1);
+
+  const playPage = useCallback(
+    async (pageIdx: number) => {
+      if (!doc || !settings || pageIdx >= pages.length) {
+        playingRef.current = false;
+        setPlayingPage(-1);
+        playingPageRef.current = -1;
+        return;
+      }
+      const pageText = pages[pageIdx];
+      if (!pageText.trim()) {
+        const next = pageIdx + 1;
+        if (next < pages.length) {
+          setCurrentPage(next);
+          setPlayingPage(next);
+          playingPageRef.current = next;
+          scrollRef.current?.scrollTo({ y: 0, animated: false });
+          playPage(next);
+        }
+        return;
+      }
+
+      setPlayingPage(pageIdx);
+      playingPageRef.current = pageIdx;
+
+      if (savedRef.current !== docName) {
+        savedRef.current = docName;
+        saveRecent({
+          type: "book",
+          title: docName || "Document",
+          preview: doc.fullText.slice(0, 120).replace(/\n/g, " "),
+          fullText: doc.fullText,
+          words: wordCount(doc.fullText),
+        });
+      }
+
+      await player.play(pageText);
+
+      // Auto-advance to next page if not stopped
+      if (playingRef.current && playingPageRef.current === pageIdx) {
+        const next = pageIdx + 1;
+        if (next < pages.length) {
+          setCurrentPage(next);
+          setPlayingPage(next);
+          playingPageRef.current = next;
+          scrollRef.current?.scrollTo({ y: 0, animated: false });
+          playPage(next);
+        } else {
+          playingRef.current = false;
+          setPlayingPage(-1);
+          playingPageRef.current = -1;
+          if (docName) removeBookmark(docName);
+        }
+      }
+    },
+    [doc, docName, settings, player.play, pages],
+  );
+
   const handlePlay = useCallback(() => {
     if (!doc || !settings) return;
-    // Play from current page onward
-    const textFromHere = pages.slice(currentPage).join("\n\n");
-    if (!textFromHere.trim()) return;
+    setEditing(false);
+    playingRef.current = true;
+    setBookmark(null);
+    playPage(currentPage);
+  }, [doc, settings, currentPage, playPage]);
 
-    if (savedRef.current !== docName) {
-      savedRef.current = docName;
-      saveRecent({
-        type: "book",
-        title: docName || "Document",
-        preview: doc.fullText.slice(0, 120).replace(/\n/g, " "),
-        fullText: doc.fullText,
-        words: wordCount(doc.fullText),
-      });
+  const handlePause = useCallback(async () => {
+    player.pause();
+    const sentIdx = player.pausedAtIndex >= 0 ? player.pausedAtIndex : player.activeIndex;
+    if (docName) {
+      const bm: Bookmark = {
+        docName,
+        page: currentPage,
+        sentenceIndex: sentIdx >= 0 ? sentIdx : 0,
+        timestamp: Date.now(),
+      };
+      await saveBookmark(bm);
+      setBookmark(bm);
     }
-    player.play(textFromHere);
-  }, [doc, docName, settings, player.play, pages, currentPage]);
+  }, [player, docName, currentPage]);
+
+  const handleResume = useCallback(() => {
+    if (!doc || !settings) return;
+    if (paused) {
+      // Resume from exact paused sentence
+      player.resume();
+    } else if (bookmark) {
+      // Resume from saved bookmark
+      setEditing(false);
+      playingRef.current = true;
+      setCurrentPage(bookmark.page);
+      const pageText = pages[bookmark.page];
+      if (pageText) {
+        player.play(pageText, bookmark.sentenceIndex);
+      }
+      setBookmark(null);
+    }
+  }, [doc, settings, paused, bookmark, player, pages]);
+
+  const handleStop = useCallback(async () => {
+    playingRef.current = false;
+    setPlayingPage(-1);
+    playingPageRef.current = -1;
+    player.stop();
+    if (docName) removeBookmark(docName);
+    setBookmark(null);
+  }, [player, docName]);
 
   const goToPage = useCallback(
     (idx: number) => {
       const clamped = Math.max(0, Math.min(idx, totalPages - 1));
       setCurrentPage(clamped);
-      listRef.current?.scrollToIndex({ index: clamped, animated: true });
+      scrollRef.current?.scrollTo({ y: 0, animated: false });
     },
     [totalPages],
   );
 
-  const onViewableItemsChanged = useRef(({ viewableItems }: any) => {
-    if (viewableItems.length > 0) {
-      setCurrentPage(viewableItems[0].index ?? 0);
-    }
-  }).current;
-
-  const viewabilityConfig = useRef({
-    viewAreaCoveragePercentThreshold: 50,
-  }).current;
-
-  const toggleControls = useCallback(() => {
-    if (!playing) setShowControls((v) => !v);
-  }, [playing]);
-
   const words = doc ? wordCount(doc.fullText) : 0;
   const progress = totalPages > 0 ? (currentPage + 1) / totalPages : 0;
 
+  // Sentences for bookmark view (when idle but bookmark exists)
+  const bookmarkSentences = useMemo(() => {
+    if (!bookmark || !pages[bookmark.page]) return [];
+    return splitSentences(pages[bookmark.page]);
+  }, [bookmark, pages]);
+
+  const showSentences = playing || paused || (bookmark && bookmarkSentences.length > 0);
+  const busy = player.phase === "loading" || playing || paused;
   const statusText = extracting
     ? "Extracting text..."
     : player.phase === "loading"
       ? "Loading engine..."
       : playing
         ? `Sentence ${player.activeIndex + 1} of ${player.sentences.length}`
-        : player.phase === "error"
-          ? player.error
-          : undefined;
+        : paused
+          ? "Paused"
+          : player.phase === "error"
+            ? player.error
+            : bookmark
+              ? `Bookmarked at page ${bookmark.page + 1}`
+              : undefined;
 
-  // Render a single page
-  const renderPage = useCallback(
-    ({ item, index }: { item: string; index: number }) => (
-      <View style={[s.page, { width: SCREEN_W }]}>
-        {playing ? (
-          // During playback, show sentence highlighting on current page only
-          index === currentPage ? (
-            <View style={s.sentenceView}>
-              {player.sentences.map((sentence, i) => (
-                <Text
-                  key={i}
-                  style={[
-                    s.pageText,
-                    { fontSize, lineHeight: fontSize * 1.75 },
-                    i === player.activeIndex && s.sentenceActive,
-                    i < player.activeIndex && s.sentenceDone,
-                  ]}
-                >
-                  {sentence}{" "}
-                </Text>
-              ))}
-            </View>
-          ) : (
-            <Text
-              style={[s.pageText, { fontSize, lineHeight: fontSize * 1.75 }]}
-              selectable
-            >
-              {item}
-            </Text>
-          )
-        ) : (
-          <Text
-            style={[s.pageText, { fontSize, lineHeight: fontSize * 1.75 }]}
-            selectable
-            onPress={toggleControls}
-          >
-            {item}
-          </Text>
-        )}
-      </View>
-    ),
-    [
-      fontSize,
-      playing,
-      player.sentences,
-      player.activeIndex,
-      currentPage,
-      toggleControls,
-    ],
+  const currentText = pages[currentPage] ?? "";
+
+  // Update doc text when editing
+  const handleEditText = useCallback(
+    (newText: string) => {
+      if (!doc) return;
+      const chapters = [...doc.chapters];
+      // Replace the text for current page in the full text
+      // Simpler: rebuild fullText from pages
+      const newPages = [...pages];
+      newPages[currentPage] = newText;
+      const newFull = newPages.join("\n\n");
+      setDoc({ ...doc, chapters: [newFull], fullText: newFull });
+    },
+    [doc, pages, currentPage],
   );
 
-  // Empty state — file picker
+  // ── Empty state ──
   if (!doc && !extracting) {
     return (
-      <View style={{ flex: 1, backgroundColor: C.surface }}>
+      <View style={{ flex: 1, backgroundColor: C.bg }}>
         <SafeAreaView style={s.safe} edges={["top", "left", "right"]}>
-          <ScreenHeader title="Book" onBack={stop} />
-          <View style={s.emptyContainer}>
-            <TouchableOpacity
-              style={s.importCard}
-              onPress={pickDocument}
-              activeOpacity={0.8}
-            >
-              <View style={s.importIconWrap}>
-                <Ionicons name="book-outline" size={40} color={C.primary} />
-              </View>
-              <Text style={s.importTitle}>Import a Book</Text>
-              <Text style={s.importSub}>PDF or EPUB files supported</Text>
-              <View style={s.importBtn}>
-                <Ionicons
-                  name="folder-open-outline"
-                  size={18}
-                  color={C.white}
-                />
-                <Text style={s.importBtnText}>Choose File</Text>
-              </View>
-            </TouchableOpacity>
+          <ScreenHeader title="Document" onBack={stop} />
 
+          {/* Top — hero + features */}
+          <View style={s.emptyTop}>
+            <View style={s.heroSection}>
+              <View style={s.heroIcon}>
+                <Ionicons
+                  name="document-text"
+                  size={32}
+                  color={C.primary}
+                />
+              </View>
+              <Text style={s.heroTitle}>Import a document</Text>
+              <Text style={s.heroSub}>
+                PDF and EPUB files supported
+              </Text>
+            </View>
+
+            <View style={s.featureList}>
+              {[
+                {
+                  icon: "document-text-outline" as const,
+                  label: "PDF",
+                  desc: "Extract text from any PDF",
+                },
+                {
+                  icon: "book-outline" as const,
+                  label: "EPUB",
+                  desc: "Full chapter-aware support",
+                },
+                {
+                  icon: "volume-medium-outline" as const,
+                  label: "Listen",
+                  desc: "Read aloud with natural voices",
+                },
+                {
+                  icon: "text-outline" as const,
+                  label: "Customize",
+                  desc: "Adjust font size, edit text",
+                },
+              ].map((f) => (
+                <View key={f.label} style={s.featureItem}>
+                  <View style={s.featureIcon}>
+                    <Ionicons name={f.icon} size={16} color={C.primary} />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={s.featureLabel}>{f.label}</Text>
+                    <Text style={s.featureDesc}>{f.desc}</Text>
+                  </View>
+                </View>
+              ))}
+            </View>
+          </View>
+
+          {/* Bottom — CTA near thumb */}
+          <View style={s.emptyBottom}>
             {error ? (
               <View style={s.errorBox}>
                 <Ionicons name="alert-circle" size={16} color={C.error} />
                 <Text style={s.errorText}>{error}</Text>
               </View>
             ) : null}
-
-            <View style={s.formatRow}>
-              <View style={s.formatTag}>
-                <Ionicons name="document-text" size={14} color={C.accent} />
-                <Text style={s.formatText}>PDF</Text>
-              </View>
-              <View style={s.formatTag}>
-                <Ionicons name="book" size={14} color={C.primary} />
-                <Text style={s.formatText}>EPUB</Text>
-              </View>
-            </View>
+            <TouchableOpacity
+              style={s.importBtn}
+              onPress={pickDocument}
+              activeOpacity={0.8}
+            >
+              <Ionicons name="add" size={20} color={C.white} />
+              <Text style={s.importBtnText}>Choose File</Text>
+            </TouchableOpacity>
           </View>
         </SafeAreaView>
       </View>
     );
   }
 
-  // Loading state
+  // ── Loading state ──
   if (extracting) {
     return (
       <View style={{ flex: 1, backgroundColor: C.surface }}>
         <SafeAreaView style={s.safe} edges={["top", "left", "right"]}>
-          <ScreenHeader title="Book" onBack={stop} />
+          <ScreenHeader title="Document" onBack={stop} />
           <View style={s.loadingContainer}>
             <ActivityIndicator size="large" color={C.primary} />
             <Text style={s.loadingText}>Extracting text...</Text>
@@ -299,16 +433,16 @@ export default function BookReader() {
     );
   }
 
-  // Book reader
+  // ── Reader ──
   return (
     <View style={{ flex: 1, backgroundColor: C.bg }}>
       <SafeAreaView style={s.safe} edges={["top", "left", "right"]}>
-        {/* Minimal header */}
+        {/* Header */}
         <View style={s.readerHeader}>
           <TouchableOpacity
             onPress={() => {
               stop();
-              require("expo-router").router.back();
+              router.back();
             }}
             hitSlop={12}
           >
@@ -319,12 +453,29 @@ export default function BookReader() {
               {docName}
             </Text>
             <Text style={s.headerMeta}>
-              {currentPage + 1} of {totalPages} · {words.toLocaleString()} words
+              Page {currentPage + 1}/{totalPages} · {words.toLocaleString()} words
             </Text>
           </View>
-          <TouchableOpacity onPress={pickDocument} hitSlop={12}>
-            <Ionicons name="swap-horizontal" size={18} color={C.textSub} />
-          </TouchableOpacity>
+          {doc && !busy ? (
+            <TouchableOpacity
+              onPress={() => setEditing((e) => !e)}
+              hitSlop={12}
+            >
+              <Ionicons
+                name={editing ? "checkmark" : "create-outline"}
+                size={20}
+                color={editing ? C.primary : C.textSub}
+              />
+            </TouchableOpacity>
+          ) : busy ? (
+            <View style={s.pageChip}>
+              <Text style={s.pageChipText}>
+                {currentPage + 1}/{totalPages}
+              </Text>
+            </View>
+          ) : (
+            <View style={{ width: 20 }} />
+          )}
         </View>
 
         {/* Progress bar */}
@@ -332,140 +483,225 @@ export default function BookReader() {
           <View style={[s.progressFill, { width: `${progress * 100}%` }]} />
         </View>
 
-        {/* Pages */}
-        <FlatList
-          ref={listRef}
-          data={pages}
-          renderItem={renderPage}
-          keyExtractor={(_, i) => `p${i}`}
-          horizontal
-          pagingEnabled
-          showsHorizontalScrollIndicator={false}
-          onViewableItemsChanged={onViewableItemsChanged}
-          viewabilityConfig={viewabilityConfig}
-          getItemLayout={(_, index) => ({
-            length: SCREEN_W,
-            offset: SCREEN_W * index,
-            index,
-          })}
-          initialScrollIndex={0}
-          maxToRenderPerBatch={3}
-          windowSize={5}
-        />
-
-        {/* Font size & page controls overlay */}
-        {showControls && !playing && (
-          <Animated.View
-            entering={SlideInDown.duration(200)}
-            exiting={SlideOutDown.duration(150)}
-            style={s.controlsOverlay}
+        {/* Font size controls */}
+        <View style={s.fontBar}>
+          <TouchableOpacity
+            onPress={() => setFontSizeIdx((i) => Math.max(0, i - 1))}
+            disabled={fontSizeIdx === 0}
+            hitSlop={8}
           >
-            <View style={s.controlsRow}>
-              <TouchableOpacity
-                onPress={() => setFontSizeIdx((i) => Math.max(0, i - 1))}
-                disabled={fontSizeIdx === 0}
-                style={s.controlBtn}
-              >
-                <Ionicons
-                  name="remove"
-                  size={20}
-                  color={fontSizeIdx === 0 ? C.textMuted : C.text}
-                />
-              </TouchableOpacity>
-              <Text style={s.controlLabel}>Aa {fontSize}px</Text>
-              <TouchableOpacity
-                onPress={() =>
-                  setFontSizeIdx((i) => Math.min(FONT_SIZES.length - 1, i + 1))
-                }
-                disabled={fontSizeIdx === FONT_SIZES.length - 1}
-                style={s.controlBtn}
-              >
-                <Ionicons
-                  name="add"
-                  size={20}
-                  color={
-                    fontSizeIdx === FONT_SIZES.length - 1 ? C.textMuted : C.text
-                  }
-                />
-              </TouchableOpacity>
-            </View>
-
-            {/* Page jump */}
-            <View style={s.controlsRow}>
-              <TouchableOpacity
-                onPress={() => goToPage(currentPage - 1)}
-                disabled={currentPage === 0}
-                style={s.controlBtn}
-              >
-                <Ionicons
-                  name="chevron-back"
-                  size={20}
-                  color={currentPage === 0 ? C.textMuted : C.text}
-                />
-              </TouchableOpacity>
-              <Text style={s.controlLabel}>
-                Page {currentPage + 1} / {totalPages}
-              </Text>
-              <TouchableOpacity
-                onPress={() => goToPage(currentPage + 1)}
-                disabled={currentPage >= totalPages - 1}
-                style={s.controlBtn}
-              >
-                <Ionicons
-                  name="chevron-forward"
-                  size={20}
-                  color={currentPage >= totalPages - 1 ? C.textMuted : C.text}
-                />
-              </TouchableOpacity>
-            </View>
-
-            <Text style={s.controlHint}>
-              {readTime(words, settings?.speed ?? 1.2)} read · Swipe to turn
-              pages
+            <Text
+              style={[
+                s.fontBtn,
+                fontSizeIdx === 0 && { color: C.textMuted },
+              ]}
+            >
+              A-
             </Text>
-          </Animated.View>
-        )}
+          </TouchableOpacity>
+          <Text style={s.fontLabel}>{fontSize}px</Text>
+          <TouchableOpacity
+            onPress={() =>
+              setFontSizeIdx((i) => Math.min(FONT_SIZES.length - 1, i + 1))
+            }
+            disabled={fontSizeIdx === FONT_SIZES.length - 1}
+            hitSlop={8}
+          >
+            <Text
+              style={[
+                s.fontBtn,
+                fontSizeIdx === FONT_SIZES.length - 1 && {
+                  color: C.textMuted,
+                },
+              ]}
+            >
+              A+
+            </Text>
+          </TouchableOpacity>
+          <View style={{ flex: 1 }} />
+          <TouchableOpacity onPress={pickDocument} hitSlop={8}>
+            <Ionicons name="swap-horizontal" size={16} color={C.textMuted} />
+          </TouchableOpacity>
+        </View>
 
-        {/* Tap zones for page turning (invisible) */}
-        {!showControls && !playing && totalPages > 1 && (
-          <>
+        {/* Content */}
+        <ScrollView
+          ref={scrollRef}
+          style={{ flex: 1 }}
+          contentContainerStyle={s.scrollContent}
+          showsVerticalScrollIndicator={true}
+          keyboardShouldPersistTaps="handled"
+        >
+          {(playing || paused) && currentPage === playingPage ? (
+            <View style={s.sentenceView}>
+              {player.sentences.map((sentence, i) =>
+                sentence === "\n" ? (
+                  <View key={i} style={{ width: "100%", height: fontSize * 0.8 }} />
+                ) : (
+                  <Text
+                    key={i}
+                    style={[
+                      s.pageText,
+                      { fontSize, lineHeight: fontSize * 1.75 },
+                      i === player.activeIndex && s.sentenceActive,
+                      i < player.activeIndex && s.sentenceDone,
+                    ]}
+                  >
+                    {sentence}{" "}
+                  </Text>
+                ),
+              )}
+            </View>
+          ) : bookmark && bookmarkSentences.length > 0 && currentPage === bookmark.page ? (
+            <View style={s.sentenceView}>
+              {bookmarkSentences.map((sentence, i) =>
+                sentence === "\n" ? (
+                  <View key={i} style={{ width: "100%", height: fontSize * 0.8 }} />
+                ) : (
+                  <Text
+                    key={i}
+                    style={[
+                      s.pageText,
+                      { fontSize, lineHeight: fontSize * 1.75 },
+                      i === bookmark.sentenceIndex && s.sentenceActive,
+                      i < bookmark.sentenceIndex && s.sentenceDone,
+                    ]}
+                  >
+                    {sentence}{" "}
+                  </Text>
+                ),
+              )}
+            </View>
+          ) : editing ? (
+            <TextInput
+              style={[
+                s.pageText,
+                s.editInput,
+                { fontSize, lineHeight: fontSize * 1.75 },
+              ]}
+              value={currentText}
+              onChangeText={handleEditText}
+              multiline
+              textAlignVertical="top"
+              selectionColor={C.primary}
+            />
+          ) : (
+            <Text
+              style={[s.pageText, { fontSize, lineHeight: fontSize * 1.75 }]}
+              selectable
+            >
+              {currentText}
+            </Text>
+          )}
+        </ScrollView>
+
+        {/* Bottom bar */}
+        <View style={s.bottomBar}>
+          {/* Row 1: status / voice info */}
+          <View style={s.barTopRow}>
+            <View style={s.barVoice}>
+              <Ionicons name="mic" size={12} color={C.primary} />
+              <Text style={s.barVoiceText}>
+                {settings?.voice ?? "Bella"} · {settings?.speed ?? 1.2}×
+              </Text>
+            </View>
+            {statusText ? (
+              <Text
+                style={[
+                  s.barStatus,
+                  player.phase === "error" && { color: C.error },
+                ]}
+                numberOfLines={1}
+              >
+                {statusText}
+              </Text>
+            ) : (
+              <Text style={s.barPageInfo}>
+                Page {currentPage + 1} of {totalPages}
+              </Text>
+            )}
+          </View>
+
+          {/* Row 2: controls */}
+          <View style={s.barControls}>
+            {/* Page prev */}
             <TouchableOpacity
-              style={s.tapZoneLeft}
               onPress={() => goToPage(currentPage - 1)}
-              activeOpacity={1}
-            />
-            <TouchableOpacity
-              style={s.tapZoneRight}
-              onPress={() => goToPage(currentPage + 1)}
-              activeOpacity={1}
-            />
-            <TouchableOpacity
-              style={s.tapZoneCenter}
-              onPress={toggleControls}
-              activeOpacity={1}
-            />
-          </>
-        )}
+              disabled={currentPage === 0}
+              style={[s.barBtn, currentPage === 0 && s.barBtnDisabled]}
+              activeOpacity={0.7}
+            >
+              <Ionicons
+                name="chevron-back"
+                size={18}
+                color={currentPage === 0 ? C.textMuted : C.textSub}
+              />
+            </TouchableOpacity>
 
-        <PlayerBar
-          phase={
-            extracting
-              ? "loading"
-              : playing
-                ? "synthesizing"
-                : player.phase === "loading"
-                  ? "loading"
-                  : player.phase === "error"
-                    ? "error"
-                    : "idle"
-          }
-          voiceName={settings?.voice ?? "Bella"}
-          speed={settings?.speed ?? 1.2}
-          disabled={!doc}
-          onPlay={handlePlay}
-          onStop={player.stop}
-          statusText={statusText}
-        />
+            {/* Stop / Clear bookmark */}
+            <TouchableOpacity
+              style={[s.barBtn, !(playing || paused || bookmark) && s.barBtnDisabled]}
+              onPress={handleStop}
+              disabled={!(playing || paused || bookmark)}
+              activeOpacity={0.7}
+            >
+              <Ionicons name="stop" size={16} color={C.textSub} />
+            </TouchableOpacity>
+
+            {/* Play / Resume — center */}
+            {player.phase === "loading" || playing ? (
+              <View style={s.playBtn}>
+                <ActivityIndicator color={C.white} size="small" />
+              </View>
+            ) : (
+              <TouchableOpacity
+                style={[
+                  s.playBtn,
+                  (!doc || player.phase === "error") && { opacity: 0.35 },
+                ]}
+                onPress={paused || bookmark ? handleResume : handlePlay}
+                disabled={!doc}
+                activeOpacity={0.8}
+              >
+                <Ionicons
+                  name="play"
+                  size={22}
+                  color={C.white}
+                  style={{ marginLeft: 2 }}
+                />
+              </TouchableOpacity>
+            )}
+
+            {/* Pause */}
+            <TouchableOpacity
+              style={[s.barBtn, !playing && s.barBtnDisabled]}
+              onPress={handlePause}
+              disabled={!playing}
+              activeOpacity={0.7}
+            >
+              <Ionicons name="pause" size={16} color={C.textSub} />
+            </TouchableOpacity>
+
+            {/* Page next */}
+            <TouchableOpacity
+              onPress={() => goToPage(currentPage + 1)}
+              disabled={currentPage >= totalPages - 1}
+              style={[
+                s.barBtn,
+                currentPage >= totalPages - 1 && s.barBtnDisabled,
+              ]}
+              activeOpacity={0.7}
+            >
+              <Ionicons
+                name="chevron-forward"
+                size={18}
+                color={
+                  currentPage >= totalPages - 1 ? C.textMuted : C.textSub
+                }
+              />
+            </TouchableOpacity>
+          </View>
+        </View>
       </SafeAreaView>
     </View>
   );
@@ -474,75 +710,59 @@ export default function BookReader() {
 const s = StyleSheet.create({
   safe: { flex: 1, backgroundColor: C.bg },
 
-  // ── Empty state ──
-  emptyContainer: {
+  // ── Empty / Import state ──
+  emptyTop: {
     flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-    padding: Spacing.xl,
+    paddingHorizontal: Spacing.lg,
   },
-  importCard: {
+  emptyBottom: {
+    paddingHorizontal: Spacing.lg,
+    paddingBottom: Platform.OS === "ios" ? 40 : Spacing.xl,
+    gap: Spacing.sm,
+  },
+  heroSection: {
+    alignItems: "center",
+    marginBottom: Spacing.lg,
+    marginTop: Spacing.lg,
+  },
+  heroIcon: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
     backgroundColor: C.surface,
-    borderRadius: Radius.lg,
-    padding: Spacing.xl,
-    alignItems: "center",
-    width: "100%",
-    maxWidth: 320,
-  },
-  importIconWrap: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    backgroundColor: C.primaryDim,
+    borderWidth: 1,
+    borderColor: C.border,
     alignItems: "center",
     justifyContent: "center",
     marginBottom: Spacing.lg,
   },
-  importTitle: {
+  heroTitle: {
     fontSize: FontSize.heading,
     fontWeight: "700",
     color: C.text,
-    marginBottom: 4,
+    marginBottom: 6,
   },
-  importSub: {
-    fontSize: FontSize.small,
+  heroSub: {
+    fontSize: FontSize.body,
     color: C.textSub,
-    marginBottom: Spacing.lg,
+    textAlign: "center",
+    lineHeight: 22,
   },
   importBtn: {
     flexDirection: "row",
     alignItems: "center",
+    justifyContent: "center",
     gap: 8,
     backgroundColor: C.primary,
-    borderRadius: Radius.full,
-    paddingHorizontal: 24,
-    paddingVertical: 12,
+    borderRadius: Radius.md,
+    paddingVertical: 14,
+    width: "100%",
   },
   importBtnText: {
     fontSize: FontSize.body,
     fontWeight: "600",
     color: C.white,
   },
-  formatRow: {
-    flexDirection: "row",
-    gap: 12,
-    marginTop: Spacing.lg,
-  },
-  formatTag: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    backgroundColor: C.surface,
-    borderRadius: Radius.full,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-  },
-  formatText: {
-    fontSize: FontSize.small,
-    color: C.textSub,
-    fontWeight: "500",
-  },
-
   errorBox: {
     flexDirection: "row",
     alignItems: "center",
@@ -551,10 +771,38 @@ const s = StyleSheet.create({
     borderRadius: Radius.sm,
     padding: Spacing.md,
     marginTop: Spacing.md,
-    width: "100%",
-    maxWidth: 320,
   },
   errorText: { fontSize: FontSize.small, color: C.error, flex: 1 },
+  featureList: {
+    marginTop: Spacing.xl,
+    gap: 0,
+  },
+  featureItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 14,
+    paddingVertical: 14,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: C.border,
+  },
+  featureIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    backgroundColor: C.primaryDim,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  featureLabel: {
+    fontSize: FontSize.body,
+    fontWeight: "600",
+    color: C.text,
+  },
+  featureDesc: {
+    fontSize: FontSize.small,
+    color: C.textSub,
+    marginTop: 1,
+  },
 
   // ── Loading state ──
   loadingContainer: {
@@ -593,6 +841,18 @@ const s = StyleSheet.create({
     marginTop: 1,
   },
 
+  pageChip: {
+    backgroundColor: C.primaryDim,
+    borderRadius: Radius.full,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+  },
+  pageChipText: {
+    fontSize: FontSize.caption,
+    fontWeight: "700",
+    color: C.primary,
+  },
+
   // ── Progress bar ──
   progressTrack: {
     height: 2,
@@ -603,18 +863,41 @@ const s = StyleSheet.create({
     backgroundColor: C.primary,
   },
 
-  // ── Page ──
-  page: {
-    paddingHorizontal: PAGE_PADDING_H,
-    paddingVertical: PAGE_PADDING_V,
-    flex: 1,
+  // ── Font bar ──
+  fontBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: Spacing.lg,
+    paddingVertical: 6,
+    gap: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: C.border,
+  },
+  fontBtn: {
+    fontSize: FontSize.body,
+    fontWeight: "700",
+    color: C.text,
+  },
+  fontLabel: {
+    fontSize: FontSize.caption,
+    color: C.textSub,
+  },
+
+  // ── Content ──
+  scrollContent: {
+    paddingHorizontal: 28,
+    paddingVertical: 24,
+    paddingBottom: 48,
   },
   pageText: {
     color: C.text,
     fontFamily: Platform.OS === "ios" ? "Georgia" : "serif",
     letterSpacing: 0.2,
   },
-
+  editInput: {
+    minHeight: 300,
+    color: C.text,
+  },
   sentenceView: {
     flexDirection: "row",
     flexWrap: "wrap",
@@ -629,73 +912,63 @@ const s = StyleSheet.create({
     color: C.textSub,
   },
 
-  // ── Controls overlay ──
-  controlsOverlay: {
-    position: "absolute",
-    bottom: Platform.OS === "ios" ? 110 : 90,
-    left: Spacing.lg,
-    right: Spacing.lg,
-    backgroundColor: C.card,
-    borderRadius: Radius.md,
-    padding: Spacing.md,
-    gap: 12,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: C.borderHi,
-
-    // Shadow
-    shadowColor: C.black,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 12,
-    elevation: 8,
+  // ── Bottom bar ──
+  bottomBar: {
+    paddingHorizontal: Spacing.lg,
+    paddingTop: 10,
+    paddingBottom: Platform.OS === "ios" ? 34 : 14,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: C.border,
+    backgroundColor: C.surface,
+    gap: 10,
   },
-  controlsRow: {
+  barTopRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  barVoice: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+  },
+  barVoiceText: {
+    fontSize: FontSize.caption,
+    fontWeight: "500",
+    color: C.textSub,
+  },
+  barStatus: {
+    fontSize: FontSize.caption,
+    fontWeight: "500",
+    color: C.primary,
+  },
+  barPageInfo: {
+    fontSize: FontSize.caption,
+    color: C.textMuted,
+  },
+  barControls: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
     gap: 16,
   },
-  controlBtn: {
+  barBtn: {
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: C.surface,
+    backgroundColor: C.card,
     alignItems: "center",
     justifyContent: "center",
   },
-  controlLabel: {
-    fontSize: FontSize.body,
-    fontWeight: "600",
-    color: C.text,
-    minWidth: 100,
-    textAlign: "center",
+  barBtnDisabled: {
+    opacity: 0.4,
   },
-  controlHint: {
-    fontSize: FontSize.caption,
-    color: C.textMuted,
-    textAlign: "center",
-  },
-
-  // ── Tap zones (invisible) ──
-  tapZoneLeft: {
-    position: "absolute",
-    left: 0,
-    top: 80,
-    bottom: 100,
-    width: SCREEN_W * 0.25,
-  },
-  tapZoneRight: {
-    position: "absolute",
-    right: 0,
-    top: 80,
-    bottom: 100,
-    width: SCREEN_W * 0.25,
-  },
-  tapZoneCenter: {
-    position: "absolute",
-    left: SCREEN_W * 0.25,
-    right: SCREEN_W * 0.25,
-    top: 80,
-    bottom: 100,
+  playBtn: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: C.primary,
+    alignItems: "center",
+    justifyContent: "center",
   },
 });

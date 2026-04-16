@@ -87,12 +87,55 @@ export async function loadRecent(): Promise<RecentItem[]> {
 
 export async function saveRecent(item: Omit<RecentItem, 'timestamp'>): Promise<void> {
   const list = await loadRecent();
-  list.unshift({ ...item, timestamp: Date.now() });
-  const trimmed = list.slice(0, 5);
+  const filtered = list.filter((r) => r.title !== item.title);
+  filtered.unshift({ ...item, timestamp: Date.now() });
+  const trimmed = filtered.slice(0, 5);
   recentFile.write(JSON.stringify(trimmed));
 }
 
 export async function clearAllData(): Promise<void> {
   await SecureStore.deleteItemAsync(KEY);
   if (recentFile.exists) recentFile.delete();
+}
+
+// ── Bookmarks (pause position) ──────────────────────────────────────────────
+
+export interface Bookmark {
+  docName: string;
+  page: number;
+  sentenceIndex: number;
+  timestamp: number;
+}
+
+const bookmarkFile = new File(Paths.document, 'bookmarks_v1.json');
+
+export async function loadBookmark(docName: string): Promise<Bookmark | null> {
+  try {
+    if (!bookmarkFile.exists) return null;
+    const raw = await bookmarkFile.text();
+    const all: Record<string, Bookmark> = raw ? JSON.parse(raw) : {};
+    return all[docName] ?? null;
+  } catch { return null; }
+}
+
+export async function saveBookmark(bookmark: Bookmark): Promise<void> {
+  let all: Record<string, Bookmark> = {};
+  try {
+    if (bookmarkFile.exists) {
+      const raw = await bookmarkFile.text();
+      all = raw ? JSON.parse(raw) : {};
+    }
+  } catch {}
+  all[bookmark.docName] = bookmark;
+  bookmarkFile.write(JSON.stringify(all));
+}
+
+export async function removeBookmark(docName: string): Promise<void> {
+  try {
+    if (!bookmarkFile.exists) return;
+    const raw = await bookmarkFile.text();
+    const all: Record<string, Bookmark> = raw ? JSON.parse(raw) : {};
+    delete all[docName];
+    bookmarkFile.write(JSON.stringify(all));
+  } catch {}
 }

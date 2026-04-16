@@ -11,16 +11,24 @@ Offline text-to-speech using KittenTTS ONNX models. Type text, pick a voice, hea
 ## Architecture Overview
 
 ```
-app/(tabs)/index.tsx          ← UI (text input, voice picker, speak/stop buttons)
+app/(app)/home.tsx            ← Home screen (recent, clipboard, entry points)
+app/(app)/reader.tsx          ← Text reader (paste/type text, listen)
+app/(app)/book.tsx            ← Document reader (PDF/EPUB import, paginated reading)
     ↓
-modules/tts/index.ts          ← Lazy loader (prevents crash on startup)
+hooks/useSentencePlayer.ts    ← Sentence-level TTS with lookahead pre-synthesis
     ↓
-modules/tts/engine.ts         ← Core: downloads model, runs ONNX inference, plays audio
+lib/tts/index.ts              ← Lazy loader (prevents crash on startup)
+lib/tts/engine.ts             ← Core: downloads model, runs ONNX inference, plays audio
     ↓
-modules/tts/phonemizer.ts     ← Text → IPA phonemes (via espeak-ng compiled to JS)
-modules/tts/preprocessor.ts   ← Text normalization (numbers, currency, abbreviations)
-modules/tts/symbols.ts        ← IPA character → token ID mapping (KittenTTS vocab)
-modules/tts/npz.ts            ← Parses .npz voice style files
+lib/tts/phonemizer.ts         ← Text → IPA phonemes (via espeak-ng compiled to JS)
+lib/tts/preprocessor.ts       ← Text normalization (numbers, currency, abbreviations)
+lib/tts/symbols.ts            ← IPA character → token ID mapping (KittenTTS vocab)
+lib/tts/npz.ts                ← Parses .npz voice style files
+    ↓
+lib/document-extract.ts       ← Unified PDF/EPUB extraction + pagination
+lib/epub-extract.ts           ← EPUB unzip + OPF spine + XHTML text extraction
+lib/pending.ts                ← In-memory text/title passing between screens
+lib/settings.ts               ← AsyncStorage settings + recent items
 ```
 
 ---
@@ -48,7 +56,7 @@ const lines = await phonemize("Hello world.", "en-us");
 
 **Problem:** `onnxruntime-react-native` installs JSI bindings the moment its JS module is imported. If the import chain is eager (UI → tts → engine → onnxruntime), the app crashes before the first frame renders.
 
-**Fix:** `modules/tts/index.ts` uses dynamic `import()` to defer loading `engine.ts` until `loadModel()` or `speak()` is actually called. Voice names are duplicated as static data to avoid triggering the eager import.
+**Fix:** `lib/tts/index.ts` uses dynamic `import()` to defer loading `engine.ts` until `loadModel()` or `speak()` is actually called. Voice names are duplicated as static data to avoid triggering the eager import.
 
 ### 3. ONNX Runtime on Android — Manual Package Registration
 
@@ -106,6 +114,38 @@ Applied automatically by `patch-package` via the `postinstall` script in `packag
 - **Voices:** 8 voices in `voices.npz` (~5MB), each with style vectors indexed by sequence length
 - **Sample rate:** 24kHz mono
 - **Downloaded from:** HuggingFace on first launch, cached to `documentDirectory`
+
+---
+
+## Features
+
+### EPUB + PDF Document Reader
+
+Full document reader (`app/(app)/book.tsx`) supporting both PDF and EPUB imports via `expo-document-picker`.
+
+- **EPUB extraction** (`lib/epub-extract.ts`): Unzips with `fflate`, parses OPF spine for reading order, extracts clean text from XHTML chapters.
+- **PDF extraction**: Uses `react-native-pdf-text` to pull text per page.
+- **Unified API** (`lib/document-extract.ts`): `extractDocument()` detects file type, delegates to the right extractor. `splitIntoPages()` paginates at paragraph boundaries. `cleanText()` fixes hyphenated line breaks and normalizes whitespace.
+- **Page-by-page reading**: Vertical ScrollView per page, header shows doc name + page info, font size adjustment bar, bottom bar with page navigation arrows and inline play/stop controls.
+- **Import screen**: Professional layout — hero icon, feature list (PDF, EPUB, Listen, Customize), thumb-friendly CTA placement at bottom.
+
+### Pre-buffered TTS Playback
+
+Sentence-level TTS with lookahead pre-synthesis to minimize gaps between sentences.
+
+- **Split pipeline** (`lib/tts/engine.ts`): `synthesize()` returns WAV path, `preparePlayer()` creates AudioPlayer, `playPrepared()` plays it. Decoupled from monolithic `speak()`.
+- **Sequential background queue** (`hooks/useSentencePlayer.ts`): Producer-consumer pattern using `ready` Map + `waiters` Map. LOOKAHEAD=5 sentences synthesized one-by-one in background (ONNX is single-threaded, parallel was worse).
+- **Pre-load first 2**: Before playback starts, first 2 sentences are synthesized and prepared. Phase set to `"loading"` immediately on play press for instant feedback.
+- **Per-page playback with auto-advance**: `playPage()` in book.tsx sends only current page text to the player. When page finishes, automatically scrolls to top and starts next page. Page number chip visible in header during playback.
+
+### Home Screen
+
+Clean home screen (`app/(app)/home.tsx`) with:
+- Greeting header with voice/speed pill and settings shortcut
+- Compact clipboard card for quick-paste reading
+- Recent documents list with type-aware icons
+- "Start listening" bottom panel: Text (paste/type) and Document (import) entry points
+- Tip cards shown when no recent items exist
 
 ---
 

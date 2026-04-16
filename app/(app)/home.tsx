@@ -6,7 +6,6 @@ import {
   StyleSheet,
   Platform,
   ScrollView,
-  Clipboard,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { router, useFocusEffect } from "expo-router";
@@ -39,21 +38,17 @@ function timeAgo(ts: number) {
 export default function Home() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [recent, setRecent] = useState<RecentItem[]>([]);
-  const [clipPreview, setClipPreview] = useState("");
 
   useFocusEffect(
     useCallback(() => {
       loadSettings().then(setSettings);
       loadRecent().then(setRecent);
-      Clipboard.getString()
-        .then((c) => setClipPreview(c?.trim().slice(0, 80) || ""))
-        .catch(() => setClipPreview(""));
     }, []),
   );
 
   return (
     <View style={s.root}>
-      <SafeAreaView style={s.safe}>
+      <SafeAreaView style={s.safe} edges={["top", "left", "right"]}>
         <View style={s.top}>
           {/* Header */}
           <View style={s.header}>
@@ -90,24 +85,6 @@ export default function Home() {
             showsVerticalScrollIndicator={false}
             contentContainerStyle={s.midContent}
           >
-            {/* Quick paste */}
-            {clipPreview.length > 0 && (
-              <TouchableOpacity
-                style={s.pasteCard}
-                onPress={() => router.push("/reader" as any)}
-                activeOpacity={0.8}
-              >
-                <View style={s.pasteHeader}>
-                  <Ionicons name="clipboard" size={14} color={C.primary} />
-                  <Text style={s.pasteLabel}>From clipboard</Text>
-                  <Ionicons name="arrow-forward" size={14} color={C.primary} />
-                </View>
-                <Text style={s.pastePreview} numberOfLines={2}>
-                  {clipPreview}
-                </Text>
-              </TouchableOpacity>
-            )}
-
             {/* Recent */}
             {recent.length > 0 && (
               <View style={s.recentSection}>
@@ -117,7 +94,7 @@ export default function Home() {
                     key={`${item.timestamp}-${i}`}
                     style={s.recentCard}
                     onPress={() => {
-                      setPending(item.fullText);
+                      setPending(item.fullText, item.title);
                       router.push(
                         item.type === "pdf" || item.type === "book"
                           ? ("/book" as any)
@@ -155,7 +132,7 @@ export default function Home() {
             )}
 
             {/* Tips — shown when nothing else */}
-            {clipPreview.length === 0 && recent.length === 0 && (
+            {recent.length === 0 && (
               <View style={s.tips}>
                 <View style={s.tipCard}>
                   <Ionicons name="copy-outline" size={18} color={C.textSub} />
@@ -202,7 +179,7 @@ export default function Home() {
         >
           <View style={[s.actionIcon, { backgroundColor: C.primaryDim }]}>
             <Ionicons
-              name="document-text-outline"
+              name="create-outline"
               size={22}
               color={C.primary}
             />
@@ -220,10 +197,10 @@ export default function Home() {
           activeOpacity={0.8}
         >
           <View style={[s.actionIcon, { backgroundColor: C.accentDim }]}>
-            <Ionicons name="book-outline" size={22} color={C.accent} />
+            <Ionicons name="document-text-outline" size={22} color={C.accent} />
           </View>
           <View style={s.actionBody}>
-            <Text style={s.actionTitle}>Book</Text>
+            <Text style={s.actionTitle}>Document</Text>
             <Text style={s.actionSub}>
               Import PDF or EPUB to read and listen
             </Text>
@@ -287,7 +264,7 @@ const s = StyleSheet.create({
     justifyContent: "center",
   },
 
-  midContent: { paddingBottom: Spacing.md },
+  midContent: { flexGrow: 1 },
 
   // Tips
   tips: { gap: 0 },
@@ -300,27 +277,6 @@ const s = StyleSheet.create({
     borderBottomColor: C.border,
   },
   tipText: { fontSize: FontSize.small, color: C.textSub, lineHeight: 18 },
-
-  // Quick paste
-  pasteCard: {
-    backgroundColor: C.surface,
-    borderRadius: Radius.md,
-    padding: Spacing.md,
-    marginBottom: Spacing.md,
-  },
-  pasteHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    marginBottom: 8,
-  },
-  pasteLabel: {
-    fontSize: FontSize.small,
-    fontWeight: "600",
-    color: C.primary,
-    flex: 1,
-  },
-  pastePreview: { fontSize: FontSize.small, color: C.textSub, lineHeight: 18 },
 
   // Recent
   recentSection: { marginTop: Spacing.xs },

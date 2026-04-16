@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState, useCallback } from "react";
+import { useFocusEffect } from "expo-router";
 import {
   View,
   Text,
@@ -7,8 +8,8 @@ import {
   StyleSheet,
   ScrollView,
   Keyboard,
-  Clipboard,
 } from "react-native";
+import * as Clipboard from "expo-clipboard";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { C, Spacing, Radius, FontSize } from "@/constants/theme";
@@ -37,6 +38,13 @@ export default function Reader() {
     speed: settings?.speed ?? 1.2,
   });
 
+  // Stop playback when navigating away
+  useFocusEffect(
+    useCallback(() => {
+      return () => { player.stop(); };
+    }, [player.stop]),
+  );
+
   const savedRef = useRef("");
   const playing = player.phase === "playing";
   const busy = player.phase === "loading" || playing;
@@ -60,7 +68,7 @@ export default function Reader() {
 
   const handlePaste = useCallback(async () => {
     try {
-      const c = await Clipboard.getString();
+      const c = await Clipboard.getStringAsync();
       if (c) setText((p) => p + c);
     } catch {}
   }, []);

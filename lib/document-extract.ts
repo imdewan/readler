@@ -18,6 +18,22 @@ function detectType(fileName: string, mimeType?: string): DocType {
   return 'pdf';
 }
 
+/** Clean up extracted text — normalize whitespace, fix common artifacts. */
+function cleanText(raw: string): string {
+  return raw
+    // Fix hyphenated line breaks (word- \nword → word)
+    .replace(/(\w)-\s*\n\s*(\w)/g, '$1$2')
+    // Collapse single newlines within paragraphs into spaces
+    .replace(/([^\n])\n([^\n])/g, '$1 $2')
+    // Normalize multiple spaces/tabs
+    .replace(/[ \t]{2,}/g, ' ')
+    // Normalize paragraph breaks (3+ newlines → 2)
+    .replace(/\n{3,}/g, '\n\n')
+    // Trim lines
+    .replace(/^ +| +$/gm, '')
+    .trim();
+}
+
 /**
  * Split a long string into rough pages by paragraph boundaries.
  * Target ~1500 chars per page (roughly one screen of text).
@@ -48,11 +64,13 @@ export async function extractDocument(
   const type = detectType(fileName, mimeType);
 
   if (type === 'epub') {
-    const chapters = await extractTextFromEpub(fileUri);
+    const rawChapters = await extractTextFromEpub(fileUri);
+    const chapters = rawChapters.map(cleanText).filter(c => c.length > 0);
     return { type, chapters, fullText: chapters.join('\n\n') };
   }
 
   // PDF
-  const text = await extractTextFromPdf(fileUri);
+  const raw = await extractTextFromPdf(fileUri);
+  const text = cleanText(raw);
   return { type: 'pdf', chapters: [text], fullText: text };
 }
