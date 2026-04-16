@@ -73,13 +73,35 @@ function findOpfPath(containerXml: string): string {
   return match ? match[1] : 'content.opf';
 }
 
+// Base64 decode that handles large strings without atob stack overflow
+const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+const B64_LOOKUP = new Uint8Array(256);
+for (let i = 0; i < B64.length; i++) B64_LOOKUP[B64.charCodeAt(i)] = i;
+
+function base64ToBytes(b64: string): Uint8Array {
+  // Strip whitespace and padding
+  const clean = b64.replace(/[\s=]/g, '');
+  const len = clean.length;
+  const outLen = (len * 3) >> 2;
+  const out = new Uint8Array(outLen);
+  let j = 0;
+  for (let i = 0; i < len; i += 4) {
+    const a = B64_LOOKUP[clean.charCodeAt(i)];
+    const b = B64_LOOKUP[clean.charCodeAt(i + 1)];
+    const c = B64_LOOKUP[clean.charCodeAt(i + 2)];
+    const d = B64_LOOKUP[clean.charCodeAt(i + 3)];
+    out[j++] = (a << 2) | (b >> 4);
+    if (j < outLen) out[j++] = ((b & 0xf) << 4) | (c >> 2);
+    if (j < outLen) out[j++] = ((c & 0x3) << 6) | d;
+  }
+  return out;
+}
+
 export async function extractTextFromEpub(fileUri: string): Promise<string[]> {
   const b64 = await FileSystem.readAsStringAsync(fileUri, {
     encoding: FileSystem.EncodingType.Base64,
   });
-  const bin = atob(b64);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const bytes = base64ToBytes(b64);
 
   const files = unzipSync(bytes);
 

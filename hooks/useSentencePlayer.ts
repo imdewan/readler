@@ -13,8 +13,11 @@ export type Phase = "idle" | "loading" | "playing" | "paused" | "error";
 
 const LOOKAHEAD = 5;
 
+const ABBREV = /^(?:Mr|Mrs|Ms|Dr|St|Sr|Jr|Prof|Gen|Gov|Sgt|Cpl|Pvt|Rev|Vol|Dept|Est|approx|vs|etc|no|op)$/i;
+
 export function splitSentences(text: string): string[] {
-  const cleaned = text.replace(/[●•◦▪▸▹►▻◆◇○■□★☆✦✧→←↑↓–—]/g, "");
+  // Only strip decorative symbols, keep dashes and punctuation
+  const cleaned = text.replace(/[●•◦▪▸▹►▻◆◇○■□★☆✦✧→←↑↓]/g, "");
   const lines = cleaned
     .split(/\n+/)
     .map((l) => l.trim())
@@ -22,15 +25,41 @@ export function splitSentences(text: string): string[] {
   const sentences: string[] = [];
   for (let li = 0; li < lines.length; li++) {
     const line = lines[li];
-    const parts = line.match(/[^.!?…]+[.!?…]+[\s"]*/g);
-    if (parts) {
-      for (const p of parts) {
-        const t = p.trim();
-        if (t) sentences.push(t);
+    // Split on sentence-ending punctuation followed by optional closing
+    // quotes, then whitespace — but only at real sentence boundaries.
+    const parts: string[] = [];
+    let buf = "";
+    for (let ci = 0; ci < line.length; ci++) {
+      buf += line[ci];
+      const ch = line[ci];
+      if (ch === "." || ch === "!" || ch === "?" || ch === "\u2026") {
+        // Consume trailing closing quotes / right-quotes
+        while (
+          ci + 1 < line.length &&
+          '"\u201C\u201D\u2018\u2019)'.includes(line[ci + 1])
+        ) {
+          ci++;
+          buf += line[ci];
+        }
+        // Check what follows: need whitespace before we consider it a split
+        const next = line[ci + 1];
+        if (!next || next === " " || next === "\t") {
+          // Don't split on abbreviations (word before the dot)
+          if (ch === ".") {
+            const wordMatch = buf.match(/(\w+)\.[""\u201D\u2019)]*$/);
+            if (wordMatch && ABBREV.test(wordMatch[1])) continue;
+          }
+          const trimmed = buf.trim();
+          if (trimmed) parts.push(trimmed);
+          buf = "";
+        }
       }
-      const consumed = parts.join("").length;
-      const remainder = line.slice(consumed).trim();
-      if (remainder) sentences.push(remainder);
+    }
+    const remainder = buf.trim();
+    if (remainder) parts.push(remainder);
+
+    if (parts.length > 0) {
+      for (const p of parts) sentences.push(p);
     } else {
       sentences.push(line);
     }
@@ -56,13 +85,18 @@ export function useSentencePlayer(opts: { voice: string; speed: number }) {
   const resumeIndexRef = useRef(-1);
 
   const play = useCallback(
-    async (text: string, startFrom = 0) => {
+    async (text: string, startFrom = 0, playOpts?: { continuing?: boolean }) => {
       stoppedRef.current = false;
       pausedRef.current = false;
       setError("");
       setActiveIndex(-1);
-      setPhase("loading");
-      await clearBuffer();
+
+      if (playOpts?.continuing) {
+        setPhase("playing");
+      } else {
+        setPhase("loading");
+        await clearBuffer();
+      }
 
       if (!isLoaded()) {
         try {
@@ -150,24 +184,27 @@ export function useSentencePlayer(opts: { voice: string; speed: number }) {
         });
       };
 
-      // Pre-synthesize first 2 real sentences from startIdx
-      let preloaded = 0;
-      let preloadIdx = startIdx;
-      while (preloaded < 2 && preloadIdx < sentences.length) {
-        if (stoppedRef.current) break;
-        if (sentences[preloadIdx] === "\n") { preloadIdx++; continue; }
-        try {
-          const wavPath = await synthesize(sentences[preloadIdx], speakOpts);
+      // Pre-synthesize first 2 real sentences (skip when continuing between pages)
+      if (!playOpts?.continuing) {
+        let preloaded = 0;
+        let preloadIdx = startIdx;
+        while (preloaded < 2 && preloadIdx < sentences.length) {
           if (stoppedRef.current) break;
-          const player = await preparePlayer(wavPath);
-          if (stoppedRef.current) { player.release(); break; }
-          ready.set(preloadIdx, { wavPath, player });
-        } catch {}
-        preloadIdx++;
-        preloaded++;
+          if (sentences[preloadIdx] === "\n") { preloadIdx++; continue; }
+          try {
+            const wavPath = await synthesize(sentences[preloadIdx], speakOpts);
+            if (stoppedRef.current) break;
+            const player = await preparePlayer(wavPath);
+            if (stoppedRef.current) { player.release(); break; }
+            ready.set(preloadIdx, { wavPath, player });
+          } catch {}
+          preloadIdx++;
+          preloaded++;
+        }
+        queueHead = preloadIdx;
+      } else {
+        queueHead = startIdx;
       }
-
-      queueHead = preloadIdx;
       runQueue();
 
       // Playback loop — start from startIdx
@@ -180,13 +217,32 @@ export function useSentencePlayer(opts: { voice: string; speed: number }) {
           continue;
         }
 
-        // Wait if paused
+        // Wait if paused — don't update resumeIndexRef here,
+        // it was already set to the correct sentence before we paused
         if (pausedRef.current) {
-          resumeIndexRef.current = i;
           await new Promise<void>((resolve) => {
             pauseResolveRef.current = resolve;
           });
           if (stoppedRef.current) break;
+          // Re-synthesize the paused sentence (old prepared was consumed)
+          try {
+            setPhase("playing");
+            const wavPath = await synthesize(sentences[i], speakOpts);
+            if (stoppedRef.current) break;
+            const p = await preparePlayer(wavPath);
+            if (stoppedRef.current) { p.release(); break; }
+            setActiveIndex(i);
+            resumeIndexRef.current = i;
+            await playPrepared(p);
+            if (pausedRef.current) { i--; continue; }
+          } catch (e) {
+            if (pausedRef.current) { i--; continue; }
+            if (!stoppedRef.current) { setError(String(e)); setPhase("error"); return; }
+            break;
+          }
+          // Kick the queue for upcoming sentences
+          if (!queueRunning) runQueue();
+          continue;
         }
 
         activeIndexRef.current = i;
@@ -203,7 +259,9 @@ export function useSentencePlayer(opts: { voice: string; speed: number }) {
           setActiveIndex(i);
           resumeIndexRef.current = i;
           await playPrepared(prepared.player);
+          if (pausedRef.current) { i--; continue; }
         } catch (e) {
+          if (pausedRef.current) { i--; continue; }
           if (!stoppedRef.current) {
             setError(String(e));
             setPhase("error");

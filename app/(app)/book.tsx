@@ -20,6 +20,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { router, useFocusEffect } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import * as DocumentPicker from "expo-document-picker";
+import * as FileSystem from "expo-file-system/legacy";
 import { C, Spacing, Radius, FontSize } from "@/constants/theme";
 import { ScreenHeader } from "@/components/ScreenHeader";
 import {
@@ -55,12 +56,8 @@ const FONT_SIZES = [14, 16, 18, 20, 22];
 export default function BookReader() {
   const [extracting, setExtracting] = useState(false);
   const [error, setError] = useState("");
-  const pending = consumePending();
-  const pendingTitle = consumePendingTitle();
-  const [docName, setDocName] = useState(pendingTitle || (pending ? "Document" : ""));
-  const [doc, setDoc] = useState<ExtractedDocument | null>(
-    pending ? { type: "pdf", chapters: [pending], fullText: pending } : null,
-  );
+  const [docName, setDocName] = useState("");
+  const [doc, setDoc] = useState<ExtractedDocument | null>(null);
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [fontSizeIdx, setFontSizeIdx] = useState(2);
   const [currentPage, setCurrentPage] = useState(0);
@@ -68,10 +65,47 @@ export default function BookReader() {
   const [editing, setEditing] = useState(false);
   const [bookmark, setBookmark] = useState<Bookmark | null>(null);
   const scrollRef = useRef<ScrollView>(null);
-
   useEffect(() => {
     loadSettings().then(setSettings);
   }, []);
+
+  // Consume pending data on focus (handles navigation from other screens)
+  useFocusEffect(
+    useCallback(() => {
+      const pending = consumePending();
+      const pendingTitle = consumePendingTitle();
+      if (!pending) return;
+
+      const isFile = pending.startsWith("file://") || pending.startsWith("/");
+
+      // Reset state for new content
+      setDoc(null);
+      setCurrentPage(0);
+      setPlayingPage(-1);
+      setEditing(false);
+      setBookmark(null);
+      setError("");
+
+      if (isFile) {
+        setExtracting(true);
+        setDocName(pendingTitle || "Document");
+        extractDocument(pending, pendingTitle || "book.epub", "application/epub+zip")
+          .then((extracted) => {
+            setDoc(extracted);
+            setDocName(pendingTitle || "Document");
+            // Delete cached EPUB — text is in memory now
+            FileSystem.deleteAsync(pending, { idempotent: true }).catch(() => {});
+          })
+          .catch((e) => {
+            setError("Extract failed: " + String(e));
+          })
+          .finally(() => setExtracting(false));
+      } else {
+        setDocName(pendingTitle || "Document");
+        setDoc({ type: "pdf", chapters: [pending], fullText: pending });
+      }
+    }, []),
+  );
 
   // Load bookmark when doc changes
   useEffect(() => {
@@ -179,7 +213,7 @@ export default function BookReader() {
   const playingPageRef = useRef(-1);
 
   const playPage = useCallback(
-    async (pageIdx: number) => {
+    async (pageIdx: number, startFrom = 0, continuing = false) => {
       if (!doc || !settings || pageIdx >= pages.length) {
         playingRef.current = false;
         setPlayingPage(-1);
@@ -194,7 +228,7 @@ export default function BookReader() {
           setPlayingPage(next);
           playingPageRef.current = next;
           scrollRef.current?.scrollTo({ y: 0, animated: false });
-          playPage(next);
+          playPage(next, 0, true);
         }
         return;
       }
@@ -213,7 +247,7 @@ export default function BookReader() {
         });
       }
 
-      await player.play(pageText);
+      await player.play(pageText, startFrom, { continuing });
 
       // Auto-advance to next page if not stopped
       if (playingRef.current && playingPageRef.current === pageIdx) {
@@ -223,7 +257,7 @@ export default function BookReader() {
           setPlayingPage(next);
           playingPageRef.current = next;
           scrollRef.current?.scrollTo({ y: 0, animated: false });
-          playPage(next);
+          playPage(next, 0, true);
         } else {
           playingRef.current = false;
           setPlayingPage(-1);
@@ -261,20 +295,15 @@ export default function BookReader() {
   const handleResume = useCallback(() => {
     if (!doc || !settings) return;
     if (paused) {
-      // Resume from exact paused sentence
       player.resume();
     } else if (bookmark) {
-      // Resume from saved bookmark
       setEditing(false);
       playingRef.current = true;
       setCurrentPage(bookmark.page);
-      const pageText = pages[bookmark.page];
-      if (pageText) {
-        player.play(pageText, bookmark.sentenceIndex);
-      }
+      playPage(bookmark.page, bookmark.sentenceIndex);
       setBookmark(null);
     }
-  }, [doc, settings, paused, bookmark, player, pages]);
+  }, [doc, settings, paused, bookmark, player, playPage]);
 
   const handleStop = useCallback(async () => {
     playingRef.current = false;
@@ -533,16 +562,14 @@ export default function BookReader() {
           keyboardShouldPersistTaps="handled"
         >
           {(playing || paused) && currentPage === playingPage ? (
-            <View style={s.sentenceView}>
+            <Text style={[s.pageText, { fontSize, lineHeight: fontSize * 1.75 }]}>
               {player.sentences.map((sentence, i) =>
                 sentence === "\n" ? (
-                  <View key={i} style={{ width: "100%", height: fontSize * 0.8 }} />
+                  <Text key={i}>{"\n\n"}</Text>
                 ) : (
                   <Text
                     key={i}
                     style={[
-                      s.pageText,
-                      { fontSize, lineHeight: fontSize * 1.75 },
                       i === player.activeIndex && s.sentenceActive,
                       i < player.activeIndex && s.sentenceDone,
                     ]}
@@ -551,18 +578,16 @@ export default function BookReader() {
                   </Text>
                 ),
               )}
-            </View>
+            </Text>
           ) : bookmark && bookmarkSentences.length > 0 && currentPage === bookmark.page ? (
-            <View style={s.sentenceView}>
+            <Text style={[s.pageText, { fontSize, lineHeight: fontSize * 1.75 }]}>
               {bookmarkSentences.map((sentence, i) =>
                 sentence === "\n" ? (
-                  <View key={i} style={{ width: "100%", height: fontSize * 0.8 }} />
+                  <Text key={i}>{"\n\n"}</Text>
                 ) : (
                   <Text
                     key={i}
                     style={[
-                      s.pageText,
-                      { fontSize, lineHeight: fontSize * 1.75 },
                       i === bookmark.sentenceIndex && s.sentenceActive,
                       i < bookmark.sentenceIndex && s.sentenceDone,
                     ]}
@@ -571,7 +596,7 @@ export default function BookReader() {
                   </Text>
                 ),
               )}
-            </View>
+            </Text>
           ) : editing ? (
             <TextInput
               style={[

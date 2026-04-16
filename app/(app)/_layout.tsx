@@ -13,6 +13,8 @@ export default function AppLayout() {
       <Stack.Screen name="home" />
       <Stack.Screen name="reader" />
       <Stack.Screen name="book" />
+      <Stack.Screen name="library" />
+      <Stack.Screen name="book-detail" />
       <Stack.Screen name="settings" />
     </Stack>
   );

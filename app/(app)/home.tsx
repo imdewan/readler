@@ -186,7 +186,7 @@ export default function Home() {
           </View>
           <View style={s.actionBody}>
             <Text style={s.actionTitle}>Text</Text>
-            <Text style={s.actionSub}>Type or paste to listen</Text>
+            <Text style={s.actionSub}>Paste or type text</Text>
           </View>
           <Ionicons name="chevron-forward" size={18} color={C.textMuted} />
         </TouchableOpacity>
@@ -202,7 +202,24 @@ export default function Home() {
           <View style={s.actionBody}>
             <Text style={s.actionTitle}>Document</Text>
             <Text style={s.actionSub}>
-              Import PDF or EPUB to read and listen
+              Import PDF or EPUB
+            </Text>
+          </View>
+          <Ionicons name="chevron-forward" size={18} color={C.textMuted} />
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={s.actionCard}
+          onPress={() => router.push("/library" as any)}
+          activeOpacity={0.8}
+        >
+          <View style={[s.actionIcon, { backgroundColor: "#1A2018" }]}>
+            <Ionicons name="library-outline" size={22} color={C.success} />
+          </View>
+          <View style={s.actionBody}>
+            <Text style={s.actionTitle}>Library</Text>
+            <Text style={s.actionSub}>
+              Free public domain books
             </Text>
           </View>
           <Ionicons name="chevron-forward" size={18} color={C.textMuted} />

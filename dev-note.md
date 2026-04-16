@@ -147,6 +147,24 @@ Clean home screen (`app/(app)/home.tsx`) with:
 - "Start listening" bottom panel: Text (paste/type) and Document (import) entry points
 - Tip cards shown when no recent items exist
 
+### Standard Ebooks Library
+
+Browse and download free public domain books from Standard Ebooks (`app/(app)/library.tsx`).
+
+- **Catalog browsing** (`lib/standard-ebooks.ts`): Scrapes Standard Ebooks HTML listing pages, parses book metadata (title, author, cover, slug).
+- **Search**: Debounced search with 500ms delay, uses Standard Ebooks query param.
+- **Tabs**: Popular and Newest sorting when not searching.
+- **Infinite scroll**: Loads more books on scroll via page param.
+- **Download flow**: Downloads EPUB to cache via `expo-file-system`, passes URI to book.tsx via pending system.
+- **Attribution**: "Books from Standard Ebooks" shown at bottom.
+
+### Pause/Resume with Bookmarks
+
+- **Pause** stops audio mid-sentence, saves page + sentence index to disk (`lib/settings.ts` bookmark API).
+- **Resume** from paused state continues from exact sentence. From cold open, loads saved bookmark and shows highlighted sentence view.
+- **Navigate away** auto-pauses and saves bookmark. Coming back restores position.
+- **Free page browsing** during playback — `playingPage` tracks TTS position separately from `currentPage`.
+
 ---
 
 ## Stack
