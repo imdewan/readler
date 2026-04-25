@@ -18,6 +18,12 @@ function intToWords(n: number): string {
     return ONES[Math.floor(n / 100)] + ' hundred' +
            (n % 100 ? ' ' + intToWords(n % 100) : '');
   }
+  // 1000-9999 — use "X hundred" form, model pronounces it better than "thousand"
+  if (n < 10_000) {
+    const hundreds = Math.floor(n / 100);
+    const rem = n % 100;
+    return intToWords(hundreds) + ' hundred' + (rem ? ' ' + intToWords(rem) : '');
+  }
   if (n < 1_000_000) {
     return intToWords(Math.floor(n / 1000)) + ' thousand' +
            (n % 1000 ? ' ' + intToWords(n % 1000) : '');
@@ -60,6 +66,9 @@ function expandDecimal(match: string): string {
 export function normalizeText(text: string): string {
   // Remove URLs
   text = text.replace(/https?:\/\/\S+/g, '');
+
+  // Strip thousands-separator commas: $1,500 → $1500, 12,345 → 12345
+  text = text.replace(/(\d),(?=\d{3}(?:\D|$))/g, '$1');
 
   // Expand contractions with apostrophes (preserve in dict lookup)
   // Already handled in dict.ts
